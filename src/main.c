@@ -26,7 +26,7 @@
 
 // Device registration variables
 static int device_id = 0;
-static char firmware_version[16] = "1.0.0"; // THIS IS v1.0.1!
+static char firmware_version[16] = "1.0.2"; // THIS IS v1.0.1!
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
