@@ -13,17 +13,20 @@
 #include "esp_sntp.h"
 #include <time.h>
 #include <sys/time.h>
+#include "esp_ota_ops.h"
+#include "esp_app_format.h"
+#include "esp_https_ota.h"
 
 #define SENSOR_PIN GPIO_NUM_0 // GPIO0 för Hall-sensorn
 #define WIFI_SSID "Bonet"
 #define WIFI_PASS "vbpB73074"
 #define SERVER_URL "http://192.168.88.118:8080/api/machine-data"
 #define REGISTER_URL "http://192.168.88.118:8080/api/register-device"
+#define CHECK_UPDATE_URL "http://192.168.88.118:8080/api/check-update/%d?current_version=%s"
 
 // Device registration variables
-static int device_id = 0;         // 0 means not registered yet
-static char device_name[64] = ""; // Empty until assigned by server
-static char firmware_version[32] = "1.0.0";
+static int device_id = 0; // 0 means not registered yet
+static char firmware_version[16] = "1.0.1";
 static TaskHandle_t registration_task_handle = NULL; // ADD THIS LINE
 // Add these global variables after the existing ones
 
@@ -33,29 +36,19 @@ static void save_device_info(void);
 static bool load_device_info(void);
 static void send_sensor_data(int sensor_value);
 static void initialize_sntp(void);
-// static void check_for_updates(void);
-// static void perform_ota_update(const char *url);
-// static void ota_task(void *pvParameters);
+static void check_for_updates(void);
+static void perform_ota_update(const char *url);
+static void ota_task(void *pvParameters);
 // ADD THIS ENTIRE FUNCTION HERE:
 static void registration_task(void *pvParameters)
 {
-    // Wait a bit for WiFi to stabilize
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     if (device_id == 0)
     {
-        printf("Device not registered, attempting registration...\n");
-        if (register_device())
-        {
-            printf("Device registered successfully! ID: %d, Name: %s\n", device_id, device_name);
-        }
-        else
-        {
-            printf("Device registration failed, will retry later\n");
-        }
+        register_device(); // Remove printf
     }
 
-    // Delete this task when done
     registration_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -85,105 +78,64 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
             xTaskCreate(registration_task, "registration", 8192, NULL, 5, &registration_task_handle);
         }
 
-        // // Create OTA task
-        // static TaskHandle_t ota_task_handle = NULL;
-        // if (ota_task_handle == NULL)
-        // {
-        //     xTaskCreate(ota_task, "ota", 8192, NULL, 3, &ota_task_handle);
-        // }
+        // Create OTA task
+        static TaskHandle_t ota_task_handle = NULL;
+        if (ota_task_handle == NULL)
+        {
+            xTaskCreate(ota_task, "ota", 6144, NULL, 3, &ota_task_handle);
+        }
     }
 }
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
-    static char response_buffer[256];
+    static char response_buffer[128]; // Reduced from 256
     static int response_index = 0;
 
     switch (evt->event_id)
     {
     case HTTP_EVENT_ERROR:
-        printf("HTTP_EVENT_ERROR\n");
         break;
     case HTTP_EVENT_ON_CONNECTED:
-        printf("HTTP_EVENT_ON_CONNECTED\n");
         response_index = 0;
         break;
-    case HTTP_EVENT_HEADERS_SENT:
-        printf("HTTP_EVENT_HEADERS_SENT\n");
-        break;
     case HTTP_EVENT_ON_HEADER:
-        printf("HTTP_EVENT_ON_HEADER, key=%s, value=%s\n", evt->header_key, evt->header_value);
         break;
     case HTTP_EVENT_ON_DATA:
-        printf("HTTP_EVENT_ON_DATA, len=%d\n", evt->data_len);
         if (evt->data_len < (sizeof(response_buffer) - response_index - 1))
         {
             memcpy(response_buffer + response_index, evt->data, evt->data_len);
             response_index += evt->data_len;
             response_buffer[response_index] = '\0';
-            printf("Received data chunk: %.*s\n", evt->data_len, (char *)evt->data);
         }
         break;
     case HTTP_EVENT_ON_FINISH:
-        printf("HTTP_EVENT_ON_FINISH\n");
-        printf("Complete response: %s\n", response_buffer);
-
-        // Parse the response here
+        // Parse only device_id
         char *id_ptr = strstr(response_buffer, "\"device_id\":");
         if (id_ptr)
         {
             id_ptr += 12;
             device_id = atoi(id_ptr);
-            printf("Parsed device_id: %d\n", device_id);
         }
         else
         {
             device_id = 64; // fallback
         }
-
-        char *name_ptr = strstr(response_buffer, "\"device_name\":\"");
-        if (name_ptr)
-        {
-            name_ptr += 15;
-            char *name_end = strchr(name_ptr, '"');
-            if (name_end)
-            {
-                int name_len = name_end - name_ptr;
-                if (name_len < sizeof(device_name))
-                {
-                    strncpy(device_name, name_ptr, name_len);
-                    device_name[name_len] = '\0';
-                }
-            }
-        }
-        else
-        {
-            strcpy(device_name, "Weaving-Machine-ESP32");
-        }
+        // Remove all device_name parsing code
         break;
     case HTTP_EVENT_DISCONNECTED:
-        printf("HTTP_EVENT_DISCONNECTED\n");
         break;
-    case HTTP_EVENT_REDIRECT: // ADD THIS CASE
-        printf("HTTP_EVENT_REDIRECT\n");
+    default:
         break;
     }
     return ESP_OK;
 }
 static bool register_device(void)
 {
-    printf("=== REGISTERING DEVICE ===\n");
-
-    char json_data[256];
-    snprintf(json_data, sizeof(json_data),
-             "{"
-             "\"firmware_version\":\"%s\","
-             "\"device_type\":\"ESP32-C6\","
-             "\"capabilities\":[\"hall_sensor\",\"wifi\"]"
-             "}",
+    char json[128]; // Reduced size
+    snprintf(json, sizeof(json),
+             "{\"firmware_version\":\"%s\",\"device_type\":\"ESP32-C6\"}",
              firmware_version);
-
-    printf("Registration JSON: %s\n", json_data);
 
     esp_http_client_config_t config = {
         .url = REGISTER_URL,
@@ -193,28 +145,13 @@ static bool register_device(void)
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_post_field(client, json_data, strlen(json_data));
+    esp_http_client_set_post_field(client, json, strlen(json));
 
     esp_err_t err = esp_http_client_perform(client);
-    bool success = false;
+    bool success = (err == ESP_OK && esp_http_client_get_status_code(client) == 200);
 
-    if (err == ESP_OK)
-    {
-        int status_code = esp_http_client_get_status_code(client);
-        printf("Registration Status = %d\n", status_code);
-
-        if (status_code == 200)
-        {
-            printf("Final device info: ID=%d, Name=%s\n", device_id, device_name);
-            save_device_info();
-            success = true;
-            printf("Registration completed successfully!\n");
-        }
-    }
-    else
-    {
-        printf("Registration failed: %s\n", esp_err_to_name(err));
-    }
+    if (success)
+        save_device_info();
 
     esp_http_client_cleanup(client);
     return success;
@@ -224,81 +161,33 @@ static bool register_device(void)
 static void save_device_info(void)
 {
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("device", NVS_READWRITE, &nvs_handle);
-    if (err == ESP_OK)
+    if (nvs_open("device", NVS_READWRITE, &nvs_handle) == ESP_OK)
     {
         nvs_set_i32(nvs_handle, "device_id", device_id);
-        nvs_set_str(nvs_handle, "device_name", device_name);
         nvs_set_str(nvs_handle, "firmware_ver", firmware_version);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
-        printf("Device info saved to NVS\n");
-    }
-    else
-    {
-        printf("Failed to save device info: %s\n", esp_err_to_name(err));
     }
 }
 
 static bool load_device_info(void)
 {
-    printf("=== ATTEMPTING TO LOAD DEVICE INFO FROM NVS ===\n");
-
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("device", NVS_READONLY, &nvs_handle);
-    if (err != ESP_OK)
-    {
-        printf("No saved device info found - NVS open failed: %s\n", esp_err_to_name(err));
+    if (nvs_open("device", NVS_READONLY, &nvs_handle) != ESP_OK)
         return false;
-    }
 
-    printf("NVS opened successfully, attempting to read device_id...\n");
-
-    size_t required_size;
-
-    // Load device_id
     int32_t temp_device_id;
-    err = nvs_get_i32(nvs_handle, "device_id", &temp_device_id);
-    printf("nvs_get_i32 result: %s\n", esp_err_to_name(err));
-
-    if (err == ESP_OK)
+    if (nvs_get_i32(nvs_handle, "device_id", &temp_device_id) == ESP_OK)
     {
         device_id = temp_device_id;
-        printf("Successfully loaded device_id: %d\n", device_id);
     }
     else
     {
         device_id = 0;
-        printf("Failed to load device_id, set to 0\n");
-    }
-
-    // Load device_name
-    required_size = sizeof(device_name);
-    err = nvs_get_str(nvs_handle, "device_name", device_name, &required_size);
-    printf("nvs_get_str result for device_name: %s\n", esp_err_to_name(err));
-
-    if (err != ESP_OK)
-    {
-        strcpy(device_name, "");
-        printf("Failed to load device_name, set to empty\n");
-    }
-    else
-    {
-        printf("Successfully loaded device_name: %s\n", device_name);
     }
 
     nvs_close(nvs_handle);
-
-    if (device_id > 0)
-    {
-        printf("=== DEVICE INFO LOADED: ID=%d, Name=%s ===\n", device_id, device_name);
-        return true;
-    }
-    else
-    {
-        printf("=== NO VALID DEVICE INFO FOUND ===\n");
-        return false;
-    }
+    return (device_id > 0);
 }
 
 static void send_sensor_data(int sensor_value)
@@ -415,24 +304,14 @@ static void initialize_sntp(void)
     }
 }
 
-#define CHECK_UPDATE_URL "http://192.168.88.118:8080/api/check-update/%d?current_version=%s"
-
 static void check_for_updates(void)
 {
-    printf("=== CHECKING FOR FIRMWARE UPDATES ===\n");
-
     if (device_id == 0)
-    {
-        printf("Device not registered, skipping update check\n");
         return;
-    }
 
-    // Build update check URL
     char check_url[256];
     snprintf(check_url, sizeof(check_url), CHECK_UPDATE_URL, device_id, firmware_version);
-    printf("Checking for updates: %s\n", check_url);
 
-    // HTTP client for update check
     esp_http_client_config_t config = {
         .url = check_url,
         .method = HTTP_METHOD_GET,
@@ -441,56 +320,31 @@ static void check_for_updates(void)
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_err_t err = esp_http_client_perform(client);
 
-    if (err == ESP_OK)
+    if (err == ESP_OK && esp_http_client_get_status_code(client) == 200)
     {
-        int status_code = esp_http_client_get_status_code(client);
-        int content_length = esp_http_client_get_content_length(client);
+        char response[512] = {0};
+        int data_read = esp_http_client_read(client, response, sizeof(response) - 1);
 
-        if (status_code == 200 && content_length > 0)
+        if (data_read > 0 && strstr(response, "\"update_available\":true"))
         {
-            char response[512] = {0};
-            int data_read = esp_http_client_read(client, response, sizeof(response) - 1);
-
-            if (data_read > 0)
+            char *url_start = strstr(response, "\"download_url\":\"");
+            if (url_start)
             {
-                printf("Update check response: %s\n", response);
-
-                // Parse JSON response for update_available
-                if (strstr(response, "\"update_available\":true"))
+                url_start += 16;
+                char *url_end = strchr(url_start, '"');
+                if (url_end)
                 {
-                    printf("🎉 UPDATE AVAILABLE!\n");
-
-                    // Extract download URL
-                    char *url_start = strstr(response, "\"download_url\":\"");
-                    if (url_start)
+                    int url_len = url_end - url_start;
+                    if (url_len < 200)
                     {
-                        url_start += 16; // Skip past "download_url":"
-                        char *url_end = strchr(url_start, '"');
-                        if (url_end)
-                        {
-                            int url_len = url_end - url_start;
-                            if (url_len < 200)
-                            {
-                                char download_url[256];
-                                strncpy(download_url, url_start, url_len);
-                                download_url[url_len] = '\0';
-
-                                printf("Starting OTA update from: %s\n", download_url);
-                                perform_ota_update(download_url);
-                            }
-                        }
+                        char download_url[256];
+                        strncpy(download_url, url_start, url_len);
+                        download_url[url_len] = '\0';
+                        perform_ota_update(download_url);
                     }
-                }
-                else
-                {
-                    printf("✅ Firmware is up to date\n");
                 }
             }
         }
-    }
-    else
-    {
-        printf("Update check failed: %s\n", esp_err_to_name(err));
     }
 
     esp_http_client_cleanup(client);
@@ -498,13 +352,10 @@ static void check_for_updates(void)
 
 static void perform_ota_update(const char *url)
 {
-    printf("=== STARTING OTA UPDATE ===\n");
-    printf("Download URL: %s\n", url);
-
     esp_http_client_config_t http_config = {
         .url = url,
         .timeout_ms = 30000,
-        .skip_cert_common_name_check = true, // For GitHub HTTPS
+        .skip_cert_common_name_check = true,
     };
 
     esp_https_ota_config_t ota_config = {
@@ -514,13 +365,8 @@ static void perform_ota_update(const char *url)
     esp_err_t ret = esp_https_ota(&ota_config);
     if (ret == ESP_OK)
     {
-        printf("🎉 OTA UPDATE SUCCESSFUL! Rebooting...\n");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
-    }
-    else
-    {
-        printf("❌ OTA update failed: %s\n", esp_err_to_name(ret));
     }
 }
 
@@ -528,8 +374,7 @@ static void ota_task(void *pvParameters)
 {
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(1800000)); // 30 minutes instead of 5
-
+        vTaskDelay(pdMS_TO_TICKS(60000)); // 1 minute
         if (device_id > 0)
         {
             check_for_updates();
@@ -554,7 +399,7 @@ void app_main(void)
     bool device_loaded = load_device_info();
     if (device_loaded)
     {
-        printf("Device already registered: ID=%d, Name=%s\n", device_id, device_name);
+        printf("Device already registered: ID=%d\n", device_id);
     }
     else
     {
@@ -597,10 +442,6 @@ void app_main(void)
     };
     gpio_config(&io_conf);
 
-    // Built-in LED
-    gpio_set_direction(GPIO_NUM_8, GPIO_MODE_OUTPUT);
-    gpio_set_level(GPIO_NUM_8, 1);
-
     // Variables for edge detection
     int previous_level = gpio_get_level(SENSOR_PIN);
     int transition_count = 0;
@@ -608,8 +449,8 @@ void app_main(void)
     int64_t last_transition_time = 0;
     const int64_t debounce_time = 50000; // 50ms debounce
 
-    printf("Starting sensor monitoring with debouncing...\n");
-    printf("Initial sensor level: %d\n", previous_level);
+    // printf("Starting sensor monitoring with debouncing...\n");
+    // printf("Initial sensor level: %d\n", previous_level);
 
     while (1)
     {
@@ -631,7 +472,7 @@ void app_main(void)
         previous_level = current_level;
 
         // Check if 10 seconds have passed
-        if ((current_time - last_send_time) >= 10000000)
+        if ((current_time - last_send_time) >= 20000000)
         {
             send_sensor_data(transition_count);
             transition_count = 0; // Reset counter
