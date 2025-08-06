@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.7";
+static char firmware_version[16] = "1.0.8";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -217,6 +217,14 @@ static void send_sensor_data(int sensor_value)
     if (device_id == 0)
         return;
 
+    // GET ESP32's IP ADDRESS
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip_info);
+
+    // GET UPTIME
+    int64_t uptime_us = esp_timer_get_time();
+    uint32_t uptime_seconds = uptime_us / 1000000;
+
     time_t now;
     struct tm timeinfo;
     time(&now);
@@ -232,16 +240,25 @@ static void send_sensor_data(int sensor_value)
              timeinfo.tm_year + 1900, timeinfo.tm_mon + 1, timeinfo.tm_mday,
              timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, ms);
 
-    char json_data[256];
+    char json_data[512]; // Increased size for metadata
     snprintf(json_data, sizeof(json_data),
              "{"
              "\"machine_id\":%d,"
              "\"timestamp\":\"%s\","
              "\"event_type\":\"production\","
              "\"value\":%d,"
-             "\"fabric_id\":1"
+             "\"fabric_id\":1,"
+             "\"metadata\":{"
+             "\"firmware_version\":\"%s\","
+             "\"ip_address\":\"" IPSTR "\","
+             "\"uptime_seconds\":%lu" // CHANGE: %u → %lu
+             "}"
              "}",
-             device_id, final_timestamp, sensor_value);
+             device_id, final_timestamp, sensor_value,
+             firmware_version, IP2STR(&ip_info.ip), (unsigned long)uptime_seconds); // CHANGE: Cast to unsigned long
+
+    printf("📤 Sending data - Value: %d, IP: " IPSTR ", Uptime: %lu sec\n",   // CHANGE: %u → %lu
+           sensor_value, IP2STR(&ip_info.ip), (unsigned long)uptime_seconds); // CHANGE: Cast to unsigned long
 
     esp_http_client_config_t config = {
         .url = SERVER_URL,
@@ -585,6 +602,15 @@ void app_main(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
+
+    // ADD BOOT BUTTON GPIO CONFIG:
+    gpio_config_t boot_conf = {
+        .pin_bit_mask = (1ULL << FACTORY_RESET_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&boot_conf);
 
     int previous_level = gpio_get_level(SENSOR_PIN);
     int transition_count = 0;
