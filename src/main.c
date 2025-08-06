@@ -19,6 +19,8 @@
 #include "esp_crt_bundle.h" // ADD THIS LINE!
 
 #define SENSOR_PIN GPIO_NUM_0
+#define FACTORY_RESET_PIN GPIO_NUM_9 // Boot button on ESP32-C6
+
 #define WIFI_SSID "Bonet"
 #define WIFI_PASS "vbpB73074"
 #define SERVER_URL "http://192.168.88.118:8080/api/machine-data"
@@ -120,7 +122,7 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         }
         else
         {
-            device_id = 64;
+            device_id = 0;
         }
         break;
     case HTTP_EVENT_DISCONNECTED:
@@ -161,35 +163,65 @@ static bool register_device(void)
 static void save_device_info(void)
 {
     nvs_handle_t nvs_handle;
-    if (nvs_open("device", NVS_READWRITE, &nvs_handle) == ESP_OK)
+    esp_err_t err = nvs_open("device", NVS_READWRITE, &nvs_handle);
+    printf("💾 NVS save open result: %s\n", esp_err_to_name(err));
+
+    if (err == ESP_OK)
     {
+        printf("💾 Saving device_id=%d, firmware=%s\n", device_id, firmware_version);
         nvs_set_i32(nvs_handle, "device_id", device_id);
         nvs_set_str(nvs_handle, "firmware_ver", firmware_version);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
+        printf("✅ Device info saved successfully\n");
+    }
+    else
+    {
+        printf("❌ Failed to open NVS for saving\n");
     }
 }
 
 static bool load_device_info(void)
 {
     nvs_handle_t nvs_handle;
-    if (nvs_open("device", NVS_READONLY, &nvs_handle) != ESP_OK)
+    esp_err_t err = nvs_open("device", NVS_READONLY, &nvs_handle);
+    printf("📂 NVS load open result: %s\n", esp_err_to_name(err));
+
+    if (err != ESP_OK)
+    {
+        printf("📂 No NVS data found, device_id = 0\n");
+        device_id = 0;
         return false;
+    }
 
     int32_t temp_device_id;
-    if (nvs_get_i32(nvs_handle, "device_id", &temp_device_id) == ESP_OK)
+    err = nvs_get_i32(nvs_handle, "device_id", &temp_device_id);
+    printf("📂 NVS get device_id result: %s\n", esp_err_to_name(err));
+
+    if (err == ESP_OK)
     {
         device_id = temp_device_id;
+        printf("✅ Loaded device_id=%d from NVS\n", device_id);
+
+        // Also try to load firmware version
+        size_t required_size = 0;
+        char stored_firmware[32];
+        err = nvs_get_str(nvs_handle, "firmware_ver", stored_firmware, &required_size);
+        if (err == ESP_OK)
+        {
+            printf("📂 Previous firmware: %s, Current: %s\n", stored_firmware, firmware_version);
+        }
     }
     else
     {
         device_id = 0;
+        printf("📂 No device_id in NVS, setting to 0\n");
     }
 
     nvs_close(nvs_handle);
+    printf("🏁 Final device_id = %d\n", device_id);
     return (device_id > 0);
 }
-
 static void send_sensor_data(int sensor_value)
 {
     if (device_id == 0)
@@ -427,7 +459,7 @@ static void perform_ota_update(const char *url)
 static void ota_task(void *pvParameters)
 {
     printf("🔧 OTA: Task started, will check every 60 seconds\n");
-    check_for_updates();
+    // check_for_updates();
 
     while (1)
     {
@@ -443,6 +475,70 @@ static void ota_task(void *pvParameters)
             printf("⏰ OTA: Skipping check - device not registered yet\n");
         }
     }
+}
+
+// Add this function after your other functions:
+static void factory_reset(void)
+{
+    printf("🏭 FACTORY RESET: Starting...\n");
+
+    // 1. Erase NVS partition
+    nvs_handle_t nvs_handle;
+    if (nvs_open("device", NVS_READWRITE, &nvs_handle) == ESP_OK)
+    {
+        nvs_erase_all(nvs_handle);
+        nvs_commit(nvs_handle);
+        nvs_close(nvs_handle);
+        printf("🏭 FACTORY RESET: NVS data erased\n");
+    }
+
+    // 2. Reset global variables
+    device_id = 0;
+    registration_task_handle = NULL;
+
+    printf("🏭 FACTORY RESET: Variables reset\n");
+
+    // 3. Restart ESP32
+    printf("🏭 FACTORY RESET: Restarting in 3 seconds...\n");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    esp_restart();
+}
+
+// Update the factory reset trigger function:
+static bool check_factory_reset_trigger(void)
+{
+    // Check if BOOT button is held LOW for 5 seconds
+    static int64_t hold_start_time = 0;
+    static bool was_holding = false;
+
+    int current_level = gpio_get_level(FACTORY_RESET_PIN);
+    int64_t current_time = esp_timer_get_time();
+
+    if (current_level == 0) // BOOT button is pressed (LOW)
+    {
+        if (!was_holding)
+        {
+            hold_start_time = current_time;
+            was_holding = true;
+            printf("🏭 Factory reset trigger detected... Hold BOOT button for 5 seconds\n");
+        }
+        else if ((current_time - hold_start_time) >= 5000000) // 5 seconds
+        {
+            printf("🏭 Factory reset triggered!\n");
+            was_holding = false;
+            return true;
+        }
+    }
+    else
+    {
+        if (was_holding)
+        {
+            printf("🏭 Factory reset cancelled\n");
+        }
+        was_holding = false;
+    }
+
+    return false;
 }
 
 void app_main(void)
@@ -494,6 +590,14 @@ void app_main(void)
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
 
+    gpio_config_t boot_conf = {
+        .pin_bit_mask = (1ULL << FACTORY_RESET_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE};
+    gpio_config(&boot_conf);
+
     int previous_level = gpio_get_level(SENSOR_PIN);
     int transition_count = 0;
     int64_t last_send_time = esp_timer_get_time();
@@ -505,6 +609,12 @@ void app_main(void)
 
     while (1)
     {
+        // Check for factory reset first
+        // if (check_factory_reset_trigger())
+        // {
+        //     factory_reset();
+        //     // This will restart the ESP32, so no code after this runs
+        // }
         int current_level = gpio_get_level(SENSOR_PIN);
         int64_t current_time = esp_timer_get_time();
 
@@ -522,6 +632,7 @@ void app_main(void)
         // 20 SECOND INTERVAL FOR v1.0.1!!!
         if ((current_time - last_send_time) >= 20000000)
         {
+            printf("Sending sensor data: %d transitions in the last 20 seconds\n", transition_count);
             send_sensor_data(transition_count);
             transition_count = 0;
             last_send_time = current_time;
