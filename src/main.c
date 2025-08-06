@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.6";
+static char firmware_version[16] = "1.0.7";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -74,7 +74,12 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     }
     else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
     {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data; // ADD THIS LINE!
+
         printf("WiFi connected successfully!\n");
+        printf("📍 ESP32 IP Address: " IPSTR "\n", IP2STR(&event->ip_info.ip));
+        printf("📍 Gateway: " IPSTR "\n", IP2STR(&event->ip_info.gw));
+        printf("📍 Netmask: " IPSTR "\n", IP2STR(&event->ip_info.netmask));
 
         initialize_sntp();
 
@@ -566,6 +571,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
+
+    // ADD MAC ADDRESS LOGGING:
+    uint8_t mac[6];
+    esp_wifi_get_mac(ESP_IF_WIFI_STA, mac);
+    printf("📍 MAC Address: %02x:%02x:%02x:%02x:%02x:%02x\n",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << SENSOR_PIN),
