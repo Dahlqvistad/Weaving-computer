@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.3";
+static char firmware_version[16] = "1.0.4";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -93,15 +93,18 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
-    static char response_buffer[128];
+    static char response_buffer[256]; // Increased size
     static int response_index = 0;
 
     switch (evt->event_id)
     {
     case HTTP_EVENT_ERROR:
+        printf("❌ HTTP: Error occurred\n");
         break;
     case HTTP_EVENT_ON_CONNECTED:
         response_index = 0;
+        memset(response_buffer, 0, sizeof(response_buffer));
+        printf("🔗 HTTP: Connected to server\n");
         break;
     case HTTP_EVENT_ON_HEADER:
         break;
@@ -114,18 +117,29 @@ static esp_err_t http_event_handler(esp_http_client_event_t *evt)
         }
         break;
     case HTTP_EVENT_ON_FINISH:
+        printf("📄 Server response: %s\n", response_buffer);
+
+        // Better JSON parsing for device_id
         char *id_ptr = strstr(response_buffer, "\"device_id\":");
         if (id_ptr)
         {
-            id_ptr += 12;
+            id_ptr += 12; // Skip "device_id":
+
+            // Skip whitespace and find the number
+            while (*id_ptr == ' ' || *id_ptr == '\t')
+                id_ptr++;
+
             device_id = atoi(id_ptr);
+            printf("✅ Extracted device_id: %d\n", device_id);
         }
         else
         {
+            printf("❌ device_id not found in response\n");
             device_id = 0;
         }
         break;
     case HTTP_EVENT_DISCONNECTED:
+        printf("🔌 HTTP: Disconnected\n");
         break;
     default:
         break;
@@ -152,6 +166,7 @@ static bool register_device(void)
 
     esp_err_t err = esp_http_client_perform(client);
     bool success = (err == ESP_OK && esp_http_client_get_status_code(client) == 200);
+    printf("Device registration %s\n", success ? "successful" : "failed");
 
     if (success)
         save_device_info();
@@ -163,65 +178,35 @@ static bool register_device(void)
 static void save_device_info(void)
 {
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("device", NVS_READWRITE, &nvs_handle);
-    printf("💾 NVS save open result: %s\n", esp_err_to_name(err));
-
-    if (err == ESP_OK)
+    if (nvs_open("device", NVS_READWRITE, &nvs_handle) == ESP_OK)
     {
-        printf("💾 Saving device_id=%d, firmware=%s\n", device_id, firmware_version);
         nvs_set_i32(nvs_handle, "device_id", device_id);
         nvs_set_str(nvs_handle, "firmware_ver", firmware_version);
         nvs_commit(nvs_handle);
         nvs_close(nvs_handle);
-        printf("✅ Device info saved successfully\n");
-    }
-    else
-    {
-        printf("❌ Failed to open NVS for saving\n");
     }
 }
 
 static bool load_device_info(void)
 {
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("device", NVS_READONLY, &nvs_handle);
-    printf("📂 NVS load open result: %s\n", esp_err_to_name(err));
-
-    if (err != ESP_OK)
-    {
-        printf("📂 No NVS data found, device_id = 0\n");
-        device_id = 0;
+    if (nvs_open("device", NVS_READONLY, &nvs_handle) != ESP_OK)
         return false;
-    }
 
     int32_t temp_device_id;
-    err = nvs_get_i32(nvs_handle, "device_id", &temp_device_id);
-    printf("📂 NVS get device_id result: %s\n", esp_err_to_name(err));
-
-    if (err == ESP_OK)
+    if (nvs_get_i32(nvs_handle, "device_id", &temp_device_id) == ESP_OK)
     {
         device_id = temp_device_id;
-        printf("✅ Loaded device_id=%d from NVS\n", device_id);
-
-        // Also try to load firmware version
-        size_t required_size = 0;
-        char stored_firmware[32];
-        err = nvs_get_str(nvs_handle, "firmware_ver", stored_firmware, &required_size);
-        if (err == ESP_OK)
-        {
-            printf("📂 Previous firmware: %s, Current: %s\n", stored_firmware, firmware_version);
-        }
     }
     else
     {
         device_id = 0;
-        printf("📂 No device_id in NVS, setting to 0\n");
     }
 
     nvs_close(nvs_handle);
-    printf("🏁 Final device_id = %d\n", device_id);
     return (device_id > 0);
 }
+
 static void send_sensor_data(int sensor_value)
 {
     if (device_id == 0)
@@ -590,14 +575,6 @@ void app_main(void)
         .intr_type = GPIO_INTR_DISABLE};
     gpio_config(&io_conf);
 
-    gpio_config_t boot_conf = {
-        .pin_bit_mask = (1ULL << FACTORY_RESET_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE};
-    gpio_config(&boot_conf);
-
     int previous_level = gpio_get_level(SENSOR_PIN);
     int transition_count = 0;
     int64_t last_send_time = esp_timer_get_time();
@@ -610,11 +587,11 @@ void app_main(void)
     while (1)
     {
         // Check for factory reset first
-        // if (check_factory_reset_trigger())
-        // {
-        //     factory_reset();
-        //     // This will restart the ESP32, so no code after this runs
-        // }
+        if (check_factory_reset_trigger())
+        {
+            factory_reset();
+        }
+
         int current_level = gpio_get_level(SENSOR_PIN);
         int64_t current_time = esp_timer_get_time();
 
@@ -632,7 +609,6 @@ void app_main(void)
         // 20 SECOND INTERVAL FOR v1.0.1!!!
         if ((current_time - last_send_time) >= 20000000)
         {
-            printf("Sending sensor data: %d transitions in the last 20 seconds\n", transition_count);
             send_sensor_data(transition_count);
             transition_count = 0;
             last_send_time = current_time;
