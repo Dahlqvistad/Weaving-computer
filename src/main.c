@@ -33,7 +33,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.0"; // THIS IS v1.0.1!
+static char firmware_version[16] = "1.0.3";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -520,7 +520,7 @@ void app_main(void)
         previous_level = current_level;
 
         // 20 SECOND INTERVAL FOR v1.0.1!!!
-        if ((current_time - last_send_time) >= 10000000)
+        if ((current_time - last_send_time) >= 20000000)
         {
             send_sensor_data(transition_count);
             transition_count = 0;
