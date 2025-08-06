@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.5";
+static char firmware_version[16] = "1.0.6";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
