@@ -448,7 +448,7 @@ static void ota_task(void *pvParameters)
 
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(60000)); // 1 minute
+        vTaskDelay(pdMS_TO_TICKS(600000)); // 1 minute
 
         if (device_id > 0)
         {
@@ -606,8 +606,7 @@ void app_main(void)
 
         previous_level = current_level;
 
-        // 20 SECOND INTERVAL FOR v1.0.1!!!
-        if ((current_time - last_send_time) >= 20000000)
+        if ((current_time - last_send_time) >= 30000000)
         {
             send_sensor_data(transition_count);
             transition_count = 0;
