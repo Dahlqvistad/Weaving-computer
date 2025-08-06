@@ -16,6 +16,7 @@
 #include "esp_ota_ops.h"
 #include "esp_app_format.h"
 #include "esp_https_ota.h"
+#include "esp_crt_bundle.h" // ADD THIS LINE!
 
 #define SENSOR_PIN GPIO_NUM_0
 #define WIFI_SSID "Bonet"
@@ -25,8 +26,14 @@
 #define CHECK_UPDATE_URL "http://192.168.88.118:8080/api/check-update/%d?current_version=%s"
 
 // Device registration variables
+// Add this global variable at the top with other globals
+// GitHub root CA certificate (DigiCert Global Root G2)
+
+static char ota_response_buffer[512] = {0};
+static int ota_response_len = 0;
+
 static int device_id = 0;
-static char firmware_version[16] = "1.0.2"; // THIS IS v1.0.1!
+static char firmware_version[16] = "1.0.0"; // THIS IS v1.0.1!
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -266,30 +273,77 @@ static void initialize_sntp(void)
     }
 }
 
+// Add this event handler for OTA HTTP requests
+static esp_err_t ota_http_event_handler(esp_http_client_event_t *evt)
+{
+    switch (evt->event_id)
+    {
+    case HTTP_EVENT_ERROR:
+        break;
+    case HTTP_EVENT_ON_CONNECTED:
+        ota_response_len = 0;
+        memset(ota_response_buffer, 0, sizeof(ota_response_buffer));
+        break;
+    case HTTP_EVENT_ON_HEADER:
+        break;
+    case HTTP_EVENT_ON_DATA:
+        if (evt->data_len < (sizeof(ota_response_buffer) - ota_response_len - 1))
+        {
+            memcpy(ota_response_buffer + ota_response_len, evt->data, evt->data_len);
+            ota_response_len += evt->data_len;
+            ota_response_buffer[ota_response_len] = '\0';
+        }
+        break;
+    case HTTP_EVENT_ON_FINISH:
+        break;
+    case HTTP_EVENT_DISCONNECTED:
+        break;
+    default:
+        break;
+    }
+    return ESP_OK;
+}
+
 static void check_for_updates(void)
 {
     if (device_id == 0)
+    {
+        printf("❌ OTA: No device_id, skipping update check\n");
         return;
+    }
+
+    printf("🔍 OTA: Checking for updates... Current: %s, Device ID: %d\n", firmware_version, device_id);
 
     char check_url[256];
     snprintf(check_url, sizeof(check_url), CHECK_UPDATE_URL, device_id, firmware_version);
+    printf("🌐 OTA: Requesting: %s\n", check_url);
+
+    // Reset response buffer
+    ota_response_len = 0;
+    memset(ota_response_buffer, 0, sizeof(ota_response_buffer));
 
     esp_http_client_config_t config = {
         .url = check_url,
         .method = HTTP_METHOD_GET,
+        .event_handler = ota_http_event_handler, // Use event handler!
+        .timeout_ms = 10000,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_err_t err = esp_http_client_perform(client);
 
+    // printf("📡 OTA: HTTP response code: %d, error: %s\n",
+    //        esp_http_client_get_status_code(client), esp_err_to_name(err));
+
     if (err == ESP_OK && esp_http_client_get_status_code(client) == 200)
     {
-        char response[512] = {0};
-        int data_read = esp_http_client_read(client, response, sizeof(response) - 1);
+        printf("📄 OTA: Server response (%d bytes): %s\n", ota_response_len, ota_response_buffer);
 
-        if (data_read > 0 && strstr(response, "\"update_available\":true"))
+        if (ota_response_len > 0 && strstr(ota_response_buffer, "\"update_available\":true"))
         {
-            char *url_start = strstr(response, "\"download_url\":\"");
+            // printf("🚀 OTA: Update available! Parsing download URL...\n");
+
+            char *url_start = strstr(ota_response_buffer, "\"download_url\":\"");
             if (url_start)
             {
                 url_start += 16;
@@ -302,11 +356,38 @@ static void check_for_updates(void)
                         char download_url[256];
                         strncpy(download_url, url_start, url_len);
                         download_url[url_len] = '\0';
+
+                        printf("📥 OTA: Starting download from: %s\n", download_url);
                         perform_ota_update(download_url);
                     }
+                    else
+                    {
+                        // printf("❌ OTA: Download URL too long (%d chars)\n", url_len);
+                    }
+                }
+                else
+                {
+                    // printf("❌ OTA: Could not find end of download URL\n");
                 }
             }
+            else
+            {
+                // printf("❌ OTA: Could not find download_url in response\n");
+            }
         }
+        else if (ota_response_len > 0)
+        {
+            // printf("✅ OTA: No update available\n");
+        }
+        else
+        {
+            // printf("❌ OTA: No data received from server\n");
+        }
+    }
+    else
+    {
+        // printf("❌ OTA: HTTP request failed - Code: %d, Error: %s\n",
+        //    esp_http_client_get_status_code(client), esp_err_to_name(err));
     }
 
     esp_http_client_cleanup(client);
@@ -314,32 +395,52 @@ static void check_for_updates(void)
 
 static void perform_ota_update(const char *url)
 {
+    printf("🔄 OTA: Starting firmware download from: %s\n", url);
+
     esp_http_client_config_t http_config = {
         .url = url,
         .timeout_ms = 30000,
-        .skip_cert_common_name_check = true,
-    };
+        .crt_bundle_attach = esp_crt_bundle_attach, // Attach the built-in cert bundle
+        .buffer_size = 4096,
+        .buffer_size_tx = 1024,
+        .skip_cert_common_name_check = true};
 
     esp_https_ota_config_t ota_config = {
         .http_config = &http_config,
     };
 
+    printf("⏳ OTA: Downloading firmware... This may take 1-3 minutes\n");
     esp_err_t ret = esp_https_ota(&ota_config);
+
     if (ret == ESP_OK)
     {
+        printf("✅ OTA: Download successful! Restarting in 2 seconds...\n");
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
+    }
+    else
+    {
+        printf("❌ OTA: Download failed: %s\n", esp_err_to_name(ret));
     }
 }
 
 static void ota_task(void *pvParameters)
 {
+    printf("🔧 OTA: Task started, will check every 60 seconds\n");
+    check_for_updates();
+
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(60000)); // 1 minute for testing
+        vTaskDelay(pdMS_TO_TICKS(60000)); // 1 minute
+
         if (device_id > 0)
         {
+            printf("⏰ OTA: Running scheduled update check...\n");
             check_for_updates();
+        }
+        else
+        {
+            printf("⏰ OTA: Skipping check - device not registered yet\n");
         }
     }
 }
@@ -419,7 +520,7 @@ void app_main(void)
         previous_level = current_level;
 
         // 20 SECOND INTERVAL FOR v1.0.1!!!
-        if ((current_time - last_send_time) >= 20000000)
+        if ((current_time - last_send_time) >= 10000000)
         {
             send_sensor_data(transition_count);
             transition_count = 0;
