@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.8";
+static char firmware_version[16] = "1.0.9";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -248,7 +248,7 @@ static void send_sensor_data(int sensor_value)
              "\"event_type\":\"production\","
              "\"value\":%d,"
              "\"fabric_id\":1,"
-             "\"metadata\":{"
+             "\"meta\":{"
              "\"firmware_version\":\"%s\","
              "\"ip_address\":\"" IPSTR "\","
              "\"uptime_seconds\":%lu" // CHANGE: %u → %lu
