@@ -35,7 +35,7 @@ static char ota_response_buffer[512] = {0};
 static int ota_response_len = 0;
 
 static int device_id = 0;
-static char firmware_version[16] = "1.0.10";
+static char firmware_version[16] = "1.0.11";
 static TaskHandle_t registration_task_handle = NULL;
 
 // Function prototypes
@@ -163,8 +163,10 @@ static bool register_device(void)
         .url = REGISTER_URL,
         .method = HTTP_METHOD_POST,
         .event_handler = http_event_handler,
+        .timeout_ms = 15000,    // ADD THIS: 15 seconds timeout
+        .buffer_size = 4096,    // ADD THIS: Increase buffer size
+        .buffer_size_tx = 1024, // ADD THIS: Increase TX buffer
     };
-
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_post_field(client, json, strlen(json));
@@ -245,7 +247,7 @@ static void send_sensor_data(int sensor_value)
              "{"
              "\"machine_id\":%d,"
              "\"timestamp\":\"%s\","
-             "\"event_type\":\"production\","
+             "\"event_type\":\"skott\","
              "\"value\":%d,"
              "\"meta\":{"
              "\"firmware_version\":\"%s\","
